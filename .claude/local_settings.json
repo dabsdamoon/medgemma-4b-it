@@ -1,0 +1,6 @@
+{
+  "test_environment": {
+    "conda_env": "medgemma",
+    "python_path": "/Users/dabsdamoon/miniconda3/envs/medgemma/bin/python"
+  }
+}

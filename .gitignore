@@ -52,7 +52,6 @@ Thumbs.db
 # Project specific
 raw/
 processed/
-notes/
 
 # Model cache (large files)
 *.bin

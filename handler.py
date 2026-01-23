@@ -1,63 +1,35 @@
 """
 RunPod Serverless Handler for MedGemma-1.5-4B-IT
 
-This handler processes medical document summarization requests.
+This handler processes medical document requests with optional image input.
+Supports custom prompts via API input - no rebuild needed for prompt changes.
+
+Environment variables:
+    USE_QUANTIZATION: "true" for 4-bit, "false" for bfloat16 (default: "true")
 """
 
 import runpod
-import torch
-from transformers import pipeline
-from PIL import Image
+import logging
+from medgemma import load_model, generate, decode_image
 
-# Global model instance (loaded once, reused across requests)
-pipe = None
+# Configure logging for RunPod
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
-
-def load_model():
-    """Load the MedGemma model."""
-    global pipe
-    if pipe is None:
-        print("Loading MedGemma-1.5-4B-IT model...")
-        pipe = pipeline(
-            "image-text-to-text",
-            model="google/medgemma-1.5-4b-it",
-            torch_dtype=torch.bfloat16,  # Required for Gemma 3 models
-            device="cuda",
-        )
-        print("Model loaded successfully!")
-    return pipe
+# Global model instances
+model = None
+processor = None
 
 
-def create_dummy_image(size=(224, 224)):
-    """Create a blank image for text-only inference."""
-    return Image.new("RGB", size, color=(255, 255, 255))
-
-
-def summarize_document(text: str, max_tokens: int = 512) -> str:
-    """Summarize a medical document."""
-    model = load_model()
-
-    prompt = f"""You are an expert medical professional.
-Provide a clear, accurate, and concise summary of the following medical document.
-Focus on key findings, diagnoses, treatments, and recommendations.
-
-Medical Document:
-{text}
-
-Summary:"""
-
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": create_dummy_image()},
-                {"type": "text", "text": prompt},
-            ]
-        }
-    ]
-
-    output = model(text=messages, max_new_tokens=max_tokens, do_sample=False)
-    return output[0]["generated_text"][-1]["content"]
+def warmup():
+    """Load model at startup for warm starts."""
+    global model, processor
+    logger.info("Warming up: Loading model...")
+    model, processor = load_model()
+    logger.info("Model ready for inference")
 
 
 def handler(job):
@@ -67,35 +39,82 @@ def handler(job):
     Expected input format:
     {
         "input": {
-            "text": "Medical document text to summarize...",
-            "max_tokens": 512  # optional
+            "text": "Medical document text or query...",
+            "image": "base64_encoded_image_string",  // optional
+            "max_tokens": 512,                       // optional, default 512
+            "mode": "summarize",                     // optional: "summarize" or "general"
+            "system_prompt": "Custom prompt..."      // optional: overrides mode default
         }
     }
 
     Returns:
     {
-        "summary": "Generated summary..."
+        "output": "Generated response...",
+        "mode": "summarize"
+    }
+
+    Or on error:
+    {
+        "error": "Error message..."
     }
     """
+    global model, processor
+
     job_input = job.get("input", {})
+    job_id = job.get("id", "unknown")
+
+    logger.info(f"Processing job {job_id}")
 
     # Validate input
     text = job_input.get("text")
     if not text:
+        logger.error(f"Job {job_id}: Missing 'text' field")
         return {"error": "Missing 'text' field in input"}
 
+    # Get optional parameters
+    image_data = job_input.get("image")
     max_tokens = job_input.get("max_tokens", 512)
+    mode = job_input.get("mode", "summarize")
+    system_prompt = job_input.get("system_prompt")  # Custom prompt (optional)
 
     try:
-        summary = summarize_document(text, max_tokens)
-        return {"summary": summary}
+        # Ensure model is loaded
+        if model is None or processor is None:
+            logger.info("Model not loaded, loading now...")
+            model, processor = load_model()
+
+        # Decode image if provided
+        image = decode_image(image_data)
+        logger.info(f"Job {job_id}: Image {'provided' if image_data else 'not provided (using dummy)'}")
+
+        if system_prompt:
+            logger.info(f"Job {job_id}: Using custom prompt")
+
+        # Generate response
+        result = generate(
+            text=text,
+            model=model,
+            processor=processor,
+            image=image,
+            max_new_tokens=max_tokens,
+            mode=mode,
+            system_prompt=system_prompt,
+        )
+
+        logger.info(f"Job {job_id}: Completed successfully")
+        return {
+            "output": result,
+            "mode": mode,
+        }
+
     except Exception as e:
+        logger.exception(f"Job {job_id}: Error during processing")
         return {"error": str(e)}
 
 
 if __name__ == "__main__":
-    # Load model at startup (warm start)
-    load_model()
+    # Load model at startup for warm starts
+    warmup()
 
     # Start the serverless handler
     runpod.serverless.start({"handler": handler})
