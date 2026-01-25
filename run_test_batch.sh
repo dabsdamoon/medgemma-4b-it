@@ -1,4 +1,5 @@
 #!/bin/bash
+
 # Load environment variables from .env file
 if [ -f .env ]; then
     export $(grep -v '^#' .env | xargs)
@@ -8,4 +9,12 @@ else
     exit 1
 fi
 
-python tests/test_batch.py /Users/dabsdamoon/projects/houmy/data_acog_markdown --limit 1
+# Activate conda environment
+eval "$(conda shell.bash hook)"
+conda activate medgemma
+
+# Run batch processing
+
+python tests/test_batch.py raw --output summaries --limit 1
+
+
