@@ -36,7 +36,9 @@ def handler(job):
     """
     RunPod serverless handler function.
 
-    Expected input format:
+    Supports two modes:
+
+    1. Single image mode (backwards compatible):
     {
         "input": {
             "text": "Medical document text or query...",
@@ -47,10 +49,29 @@ def handler(job):
         }
     }
 
-    Returns:
+    2. Batch mode (multiple images in one request):
+    {
+        "input": {
+            "batch": true,
+            "images": ["base64_img1", "base64_img2", ...],
+            "texts": ["context1", "context2", ...],  // optional, defaults to empty strings
+            "max_tokens": 512,
+            "mode": "figure_analysis",
+            "system_prompt": "Custom prompt..."
+        }
+    }
+
+    Returns (single mode):
     {
         "output": "Generated response...",
         "mode": "summarize"
+    }
+
+    Returns (batch mode):
+    {
+        "outputs": ["result1", "result2", ...],
+        "mode": "figure_analysis",
+        "count": 5
     }
 
     Or on error:
@@ -65,6 +86,27 @@ def handler(job):
 
     logger.info(f"Processing job {job_id}")
 
+    try:
+        # Ensure model is loaded
+        if model is None or processor is None:
+            logger.info("Model not loaded, loading now...")
+            model, processor = load_model()
+
+        # Check if batch mode
+        if job_input.get("batch") or "images" in job_input:
+            return _handle_batch(job_id, job_input)
+        else:
+            return _handle_single(job_id, job_input)
+
+    except Exception as e:
+        logger.exception(f"Job {job_id}: Error during processing")
+        return {"error": str(e)}
+
+
+def _handle_single(job_id: str, job_input: dict) -> dict:
+    """Handle single image request (backwards compatible)."""
+    global model, processor
+
     # Validate input
     text = job_input.get("text")
     if not text:
@@ -75,41 +117,97 @@ def handler(job):
     image_data = job_input.get("image")
     max_tokens = job_input.get("max_tokens", 512)
     mode = job_input.get("mode", "summarize")
-    system_prompt = job_input.get("system_prompt")  # Custom prompt (optional)
+    system_prompt = job_input.get("system_prompt")
 
-    try:
-        # Ensure model is loaded
-        if model is None or processor is None:
-            logger.info("Model not loaded, loading now...")
-            model, processor = load_model()
+    # Decode image if provided
+    image = decode_image(image_data)
+    logger.info(f"Job {job_id}: Image {'provided' if image_data else 'not provided (using dummy)'}")
 
-        # Decode image if provided
-        image = decode_image(image_data)
-        logger.info(f"Job {job_id}: Image {'provided' if image_data else 'not provided (using dummy)'}")
+    if system_prompt:
+        logger.info(f"Job {job_id}: Using custom prompt")
 
-        if system_prompt:
-            logger.info(f"Job {job_id}: Using custom prompt")
+    # Generate response
+    result = generate(
+        text=text,
+        model=model,
+        processor=processor,
+        image=image,
+        max_new_tokens=max_tokens,
+        mode=mode,
+        system_prompt=system_prompt,
+    )
 
-        # Generate response
-        result = generate(
-            text=text,
-            model=model,
-            processor=processor,
-            image=image,
-            max_new_tokens=max_tokens,
-            mode=mode,
-            system_prompt=system_prompt,
-        )
+    logger.info(f"Job {job_id}: Completed successfully")
+    return {
+        "output": result,
+        "mode": mode,
+    }
 
-        logger.info(f"Job {job_id}: Completed successfully")
-        return {
-            "output": result,
-            "mode": mode,
-        }
 
-    except Exception as e:
-        logger.exception(f"Job {job_id}: Error during processing")
-        return {"error": str(e)}
+def _handle_batch(job_id: str, job_input: dict) -> dict:
+    """Handle batch image request (multiple images in one call)."""
+    global model, processor
+
+    # Get images list
+    images_data = job_input.get("images", [])
+    if not images_data:
+        logger.error(f"Job {job_id}: Missing 'images' field for batch mode")
+        return {"error": "Missing 'images' field for batch mode"}
+
+    # Get texts (optional, defaults to empty strings)
+    texts = job_input.get("texts", [""] * len(images_data))
+    if len(texts) != len(images_data):
+        texts = texts + [""] * (len(images_data) - len(texts))
+
+    # Get optional parameters
+    max_tokens = job_input.get("max_tokens", 512)
+    mode = job_input.get("mode", "figure_analysis")
+    system_prompt = job_input.get("system_prompt")
+
+    logger.info(f"Job {job_id}: Batch mode with {len(images_data)} images")
+
+    if system_prompt:
+        logger.info(f"Job {job_id}: Using custom prompt")
+
+    # Process each image sequentially (same GPU memory as single image)
+    results = []
+    errors = []
+
+    for idx, (image_data, text) in enumerate(zip(images_data, texts)):
+        try:
+            image = decode_image(image_data)
+
+            result = generate(
+                text=text,
+                model=model,
+                processor=processor,
+                image=image,
+                max_new_tokens=max_tokens,
+                mode=mode,
+                system_prompt=system_prompt,
+            )
+
+            results.append(result)
+            logger.info(f"Job {job_id}: Processed image {idx + 1}/{len(images_data)}")
+
+        except Exception as e:
+            error_msg = f"Error processing image {idx}: {str(e)}"
+            logger.error(f"Job {job_id}: {error_msg}")
+            results.append(None)
+            errors.append(error_msg)
+
+    logger.info(f"Job {job_id}: Batch completed - {len(results)} results, {len(errors)} errors")
+
+    response = {
+        "outputs": results,
+        "mode": mode,
+        "count": len(results),
+    }
+
+    if errors:
+        response["errors"] = errors
+
+    return response
 
 
 if __name__ == "__main__":

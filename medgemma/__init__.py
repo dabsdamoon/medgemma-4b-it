@@ -10,7 +10,7 @@ This module provides:
 
 from .model import load_model, generate
 from .prompts import get_prompt, list_modes, DEFAULT_PROMPTS
-from .utils import decode_image, create_dummy_image
+from .utils import decode_image, create_dummy_image, encode_image, hash_image
 
 __all__ = [
     "load_model",
@@ -20,4 +20,6 @@ __all__ = [
     "DEFAULT_PROMPTS",
     "decode_image",
     "create_dummy_image",
+    "encode_image",
+    "hash_image",
 ]

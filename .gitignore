@@ -53,8 +53,11 @@ Thumbs.db
 raw/
 processed/
 summaries/
+summaries*/
 competition/
 notes/
+old/
+output*/
 
 # Model cache (large files)
 *.bin
@@ -73,3 +76,17 @@ logs/
 *.temp
 tmp/
 temp/
+tmp_*.sh
+
+# Environment (sensitive)
+.envrc
+
+# Test outputs
+output_prompt_adapter_results.json
+tmp_run.sh
+
+# Demo cached examples (generated)
+demo/cached_examples/
+
+# Guidelines (local docs)
+guidelines/

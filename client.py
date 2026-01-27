@@ -70,6 +70,45 @@ class MedGemmaClient:
 
         return payload
 
+    def _build_batch_payload(
+        self,
+        image_paths: list[str],
+        texts: list[str] = None,
+        max_tokens: int = 512,
+        mode: str = "figure_analysis",
+        system_prompt: str = None,
+    ) -> dict:
+        """Build the batch request payload."""
+        # Encode all images
+        images_b64 = []
+        for image_path in image_paths:
+            image_path = Path(image_path)
+            if not image_path.exists():
+                raise FileNotFoundError(f"Image not found: {image_path}")
+
+            with open(image_path, "rb") as f:
+                image_bytes = f.read()
+            images_b64.append(base64.b64encode(image_bytes).decode("utf-8"))
+
+        # Default texts to empty strings
+        if texts is None:
+            texts = [""] * len(image_paths)
+
+        payload = {
+            "input": {
+                "batch": True,
+                "images": images_b64,
+                "texts": texts,
+                "max_tokens": max_tokens,
+                "mode": mode,
+            }
+        }
+
+        if system_prompt:
+            payload["input"]["system_prompt"] = system_prompt
+
+        return payload
+
     def process_sync(
         self,
         text: str,
@@ -173,6 +212,118 @@ class MedGemmaClient:
             else:
                 raise Exception(f"Unknown status: {status['status']}")
 
+    def process_batch_sync(
+        self,
+        image_paths: list[str],
+        texts: list[str] = None,
+        max_tokens: int = 512,
+        mode: str = "figure_analysis",
+        system_prompt: str = None,
+        timeout: int = 600,
+    ) -> list[str]:
+        """
+        Synchronous batch processing (waits for all results).
+        Best for small batches (< 5 images).
+
+        Args:
+            image_paths: List of paths to image files
+            texts: Optional list of context texts (one per image)
+            max_tokens: Maximum tokens to generate per image
+            mode: Processing mode
+            system_prompt: Custom system prompt (overrides mode default)
+            timeout: Request timeout in seconds (longer for batches)
+
+        Returns:
+            list[str]: List of generated responses
+        """
+        payload = self._build_batch_payload(
+            image_paths, texts, max_tokens, mode, system_prompt
+        )
+
+        response = requests.post(
+            f"{self.base_url}/runsync",
+            headers=self.headers,
+            json=payload,
+            timeout=timeout
+        )
+        response.raise_for_status()
+        result = response.json()
+
+        if result.get("status") == "COMPLETED":
+            output = result.get("output", {})
+            if "error" in output:
+                raise Exception(f"API Error: {output['error']}")
+            return output.get("outputs", [])
+        elif "error" in result:
+            raise Exception(f"API Error: {result['error']}")
+        else:
+            raise Exception(f"Unexpected response: {result}")
+
+    def process_batch_async(
+        self,
+        image_paths: list[str],
+        texts: list[str] = None,
+        max_tokens: int = 512,
+        mode: str = "figure_analysis",
+        system_prompt: str = None,
+        poll_interval: int = 5,
+    ) -> list[str]:
+        """
+        Asynchronous batch processing (polls for results).
+        Better for larger batches to avoid timeout.
+
+        Args:
+            image_paths: List of paths to image files
+            texts: Optional list of context texts (one per image)
+            max_tokens: Maximum tokens to generate per image
+            mode: Processing mode
+            system_prompt: Custom system prompt (overrides mode default)
+            poll_interval: Seconds between status checks
+
+        Returns:
+            list[str]: List of generated responses
+        """
+        payload = self._build_batch_payload(
+            image_paths, texts, max_tokens, mode, system_prompt
+        )
+
+        # Start the job
+        response = requests.post(
+            f"{self.base_url}/run",
+            headers=self.headers,
+            json=payload
+        )
+        response.raise_for_status()
+        job_id = response.json()["id"]
+        print(f"Batch job started: {job_id} ({len(image_paths)} images)")
+
+        # Poll for completion
+        while True:
+            status_response = requests.get(
+                f"{self.base_url}/status/{job_id}",
+                headers=self.headers
+            )
+            status_response.raise_for_status()
+            status = status_response.json()
+
+            print(f"Status: {status['status']}")
+
+            if status["status"] == "COMPLETED":
+                output = status.get("output", {})
+                if "error" in output:
+                    raise Exception(f"Batch job error: {output['error']}")
+                outputs = output.get("outputs", [])
+                errors = output.get("errors", [])
+                if errors:
+                    print(f"Warning: {len(errors)} errors in batch: {errors}")
+                return outputs
+            elif status["status"] == "FAILED":
+                raise Exception(f"Batch job failed: {status.get('error', 'Unknown error')}")
+            elif status["status"] in ["IN_QUEUE", "IN_PROGRESS"]:
+                time.sleep(poll_interval)
+            else:
+                raise Exception(f"Unknown status: {status['status']}")
+
     def health_check(self) -> dict:
         """Check endpoint health."""
         response = requests.get(
@@ -190,6 +341,35 @@ class MedGemmaClient:
     def query(self, text: str, image_path: str = None, max_tokens: int = 512) -> str:
         """Ask a general medical question."""
         return self.process_sync(text, image_path, max_tokens, mode="general")
+
+    def analyze_figures(
+        self,
+        image_paths: list[str],
+        contexts: list[str] = None,
+        max_tokens: int = 512,
+        system_prompt: str = None,
+    ) -> list[str]:
+        """
+        Analyze multiple medical figures in a single batch request.
+
+        Args:
+            image_paths: List of paths to medical figure images
+            contexts: Optional list of context texts (e.g., nearby OCR text)
+            max_tokens: Maximum tokens to generate per figure
+            system_prompt: Custom system prompt for analysis
+
+        Returns:
+            list[str]: List of analysis results (one per image)
+        """
+        # Use async for batches > 3, sync for smaller batches
+        if len(image_paths) > 3:
+            return self.process_batch_async(
+                image_paths, contexts, max_tokens, "figure_analysis", system_prompt
+            )
+        else:
+            return self.process_batch_sync(
+                image_paths, contexts, max_tokens, "figure_analysis", system_prompt
+            )
 
 
 def main():
