@@ -4,6 +4,8 @@ Pipeline configuration module.
 Defines configuration settings and modes for the document modernizer pipeline.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -70,6 +72,7 @@ class PipelineConfig:
     image_generator: ImageGeneratorBackend = ImageGeneratorBackend.CACHED
     generation_variants: int = 1  # Number of variants per figure (1-4)
     generation_strength: float = 0.75  # How much to transform (0=identical, 1=full change)
+    sanitize_prompts: bool = True  # Sanitize prompts to avoid safety filter blocks
 
     # Vertex AI settings (for VERTEX_FLASH and VERTEX_PRO backends)
     gcp_project_id: Optional[str] = None  # Defaults to GOOGLE_CLOUD_PROJECT env var
@@ -84,6 +87,7 @@ class PipelineConfig:
     max_tokens: int = 1024
 
     # Alignment evaluation
+    run_alignment_eval: bool = False  # If True, run alignment evaluation after generation
     alignment_thresholds: AlignmentThresholds = field(
         default_factory=AlignmentThresholds
     )

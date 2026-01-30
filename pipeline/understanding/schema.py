@@ -47,6 +47,10 @@ class AnalysisConstraints(BaseModel):
         default_factory=list,
         description="Required labels or annotations",
     )
+    colorization: list[str] = Field(
+        default_factory=list,
+        description="Color requirements for each element type (skin, instruments, tissue)",
+    )
 
 
 class FigureAnalysis(BaseModel):

@@ -12,6 +12,7 @@ Environment variables:
     RUNPOD_ENDPOINT_ID: Your endpoint ID
 """
 
+import logging
 import os
 import sys
 import time
@@ -19,6 +20,8 @@ import base64
 import argparse
 import requests
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class MedGemmaClient:
@@ -117,10 +120,12 @@ class MedGemmaClient:
         mode: str = "summarize",
         system_prompt: str = None,
         timeout: int = 300,
+        poll_interval: int = 2,
     ) -> str:
         """
         Synchronous processing (waits for result).
         Best for short documents and quick responses.
+        Falls back to polling if runsync times out.
 
         Args:
             text: Input text or query
@@ -129,6 +134,7 @@ class MedGemmaClient:
             mode: "summarize" for document summarization, "general" for Q&A
             system_prompt: Custom system prompt (overrides mode default)
             timeout: Request timeout in seconds
+            poll_interval: Seconds between status checks if polling
 
         Returns:
             str: Generated response
@@ -146,12 +152,41 @@ class MedGemmaClient:
 
         if result.get("status") == "COMPLETED":
             return result["output"]["output"]
+        elif result.get("status") in ("IN_PROGRESS", "IN_QUEUE"):
+            # runsync timed out or still queueing, fall back to polling
+            job_id = result.get("id")
+            if not job_id:
+                raise Exception(f"{result.get('status')} but no job ID: {result}")
+            logger.debug(f"Job {result.get('status')}, polling for completion: {job_id}")
+            return self._poll_for_result(job_id, poll_interval)
         elif "error" in result.get("output", {}):
             raise Exception(f"API Error: {result['output']['error']}")
         elif "error" in result:
             raise Exception(f"API Error: {result['error']}")
         else:
             raise Exception(f"Unexpected response: {result}")
+
+    def _poll_for_result(self, job_id: str, poll_interval: int = 2) -> str:
+        """Poll for job completion and return result."""
+        while True:
+            status_response = requests.get(
+                f"{self.base_url}/status/{job_id}",
+                headers=self.headers
+            )
+            status_response.raise_for_status()
+            status = status_response.json()
+
+            if status["status"] == "COMPLETED":
+                output = status.get("output", {})
+                if "error" in output:
+                    raise Exception(f"Job error: {output['error']}")
+                return output.get("output", output.get("summary", str(output)))
+            elif status["status"] == "FAILED":
+                raise Exception(f"Job failed: {status.get('error', 'Unknown error')}")
+            elif status["status"] in ["IN_QUEUE", "IN_PROGRESS"]:
+                time.sleep(poll_interval)
+            else:
+                raise Exception(f"Unknown status: {status['status']}")
 
     def process_async(
         self,
@@ -187,7 +222,7 @@ class MedGemmaClient:
         )
         response.raise_for_status()
         job_id = response.json()["id"]
-        print(f"Job started: {job_id}")
+        logger.debug(f"Job started: {job_id}")
 
         # Poll for completion
         while True:
@@ -198,7 +233,7 @@ class MedGemmaClient:
             status_response.raise_for_status()
             status = status_response.json()
 
-            print(f"Status: {status['status']}")
+            logger.debug(f"Status: {status['status']}")
 
             if status["status"] == "COMPLETED":
                 output = status.get("output", {})
@@ -220,10 +255,12 @@ class MedGemmaClient:
         mode: str = "figure_analysis",
         system_prompt: str = None,
         timeout: int = 600,
+        poll_interval: int = 5,
     ) -> list[str]:
         """
         Synchronous batch processing (waits for all results).
         Best for small batches (< 5 images).
+        Falls back to polling if runsync times out.
 
         Args:
             image_paths: List of paths to image files
@@ -232,6 +269,7 @@ class MedGemmaClient:
             mode: Processing mode
             system_prompt: Custom system prompt (overrides mode default)
             timeout: Request timeout in seconds (longer for batches)
+            poll_interval: Seconds between status checks if polling
 
         Returns:
             list[str]: List of generated responses
@@ -254,10 +292,43 @@ class MedGemmaClient:
             if "error" in output:
                 raise Exception(f"API Error: {output['error']}")
             return output.get("outputs", [])
+        elif result.get("status") in ("IN_PROGRESS", "IN_QUEUE"):
+            # runsync timed out or still queueing, fall back to polling
+            job_id = result.get("id")
+            if not job_id:
+                raise Exception(f"{result.get('status')} but no job ID: {result}")
+            logger.debug(f"Batch job {result.get('status')}, polling for completion: {job_id}")
+            return self._poll_for_batch_result(job_id, poll_interval)
         elif "error" in result:
             raise Exception(f"API Error: {result['error']}")
         else:
             raise Exception(f"Unexpected response: {result}")
+
+    def _poll_for_batch_result(self, job_id: str, poll_interval: int = 5) -> list[str]:
+        """Poll for batch job completion and return results."""
+        while True:
+            status_response = requests.get(
+                f"{self.base_url}/status/{job_id}",
+                headers=self.headers
+            )
+            status_response.raise_for_status()
+            status = status_response.json()
+
+            if status["status"] == "COMPLETED":
+                output = status.get("output", {})
+                if "error" in output:
+                    raise Exception(f"Batch job error: {output['error']}")
+                outputs = output.get("outputs", [])
+                errors = output.get("errors", [])
+                if errors:
+                    logger.warning(f"{len(errors)} errors in batch: {errors}")
+                return outputs
+            elif status["status"] == "FAILED":
+                raise Exception(f"Batch job failed: {status.get('error', 'Unknown error')}")
+            elif status["status"] in ["IN_QUEUE", "IN_PROGRESS"]:
+                time.sleep(poll_interval)
+            else:
+                raise Exception(f"Unknown status: {status['status']}")
 
     def process_batch_async(
         self,
@@ -295,7 +366,7 @@ class MedGemmaClient:
         )
         response.raise_for_status()
         job_id = response.json()["id"]
-        print(f"Batch job started: {job_id} ({len(image_paths)} images)")
+        logger.debug(f"Batch job started: {job_id} ({len(image_paths)} images)")
 
         # Poll for completion
         while True:
@@ -306,7 +377,7 @@ class MedGemmaClient:
             status_response.raise_for_status()
             status = status_response.json()
 
-            print(f"Status: {status['status']}")
+            logger.debug(f"Status: {status['status']}")
 
             if status["status"] == "COMPLETED":
                 output = status.get("output", {})
@@ -315,7 +386,7 @@ class MedGemmaClient:
                 outputs = output.get("outputs", [])
                 errors = output.get("errors", [])
                 if errors:
-                    print(f"Warning: {len(errors)} errors in batch: {errors}")
+                    logger.warning(f"{len(errors)} errors in batch: {errors}")
                 return outputs
             elif status["status"] == "FAILED":
                 raise Exception(f"Batch job failed: {status.get('error', 'Unknown error')}")

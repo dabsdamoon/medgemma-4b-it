@@ -8,7 +8,23 @@ This module provides:
 - Image decoding utilities
 """
 
-from .model import load_model, generate
+# Suppress NumPy/Torch compatibility warnings during import
+import sys
+import os
+import warnings
+
+os.environ.setdefault("PYTHONWARNINGS", "ignore")
+warnings.filterwarnings("ignore")
+
+# Temporarily redirect stderr to suppress NumPy C-level warnings
+_stderr = sys.stderr
+try:
+    sys.stderr = open(os.devnull, "w")
+    from .model import load_model, generate
+finally:
+    sys.stderr.close()
+    sys.stderr = _stderr
+
 from .prompts import get_prompt, list_modes, DEFAULT_PROMPTS
 from .utils import decode_image, create_dummy_image, encode_image, hash_image
 

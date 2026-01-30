@@ -4,6 +4,8 @@ Main pipeline orchestrator.
 Coordinates all stages of the document modernization pipeline.
 """
 
+from __future__ import annotations
+
 import hashlib
 import logging
 from pathlib import Path
@@ -22,9 +24,12 @@ from .generation import (
     CachedImageGenerator,
     VertexImageGenerator,
     ImageModel,
+    SafetyFilterError,
+    get_sanitizer,
 )
 from .evaluation import AlignmentScorer
 from .output import OutputBundler, OutputBundle, DocumentMetadata, FigureMetadata
+from .utils import timed_operation
 
 logger = logging.getLogger(__name__)
 
@@ -536,15 +541,17 @@ class DocumentModernizer:
         """Analyze figure with MedGemma but skip image generation."""
         from medgemma import hash_image
 
+        verbose = self.config.verbose
+
         # Compute original hash
         original_hash = hash_image(figure.image)
 
         # Analyze figure with MedGemma
-        logger.debug(f"Analyzing figure {figure.figure_id}")
-        analysis = self.captioner.analyze_figure(
-            figure.image,
-            context=figure.nearby_text,
-        )
+        with timed_operation(f"MedGemma analysis [{figure.figure_id}]", verbose=verbose):
+            analysis = self.captioner.analyze_figure(
+                figure.image,
+                context=figure.nearby_text,
+            )
 
         # Convert to image generation prompt (for saving)
         brief = self.prompt_adapter.convert(analysis)
@@ -621,14 +628,15 @@ class DocumentModernizer:
         """
         from medgemma import hash_image
 
-        logger.info(f"Batch analyzing {len(figures)} figures...")
+        verbose = self.config.verbose
 
         # Extract images and contexts
         images = [fig.image for fig in figures]
         contexts = [fig.nearby_text or "" for fig in figures]
 
         # Run batch analysis
-        analyses = self.captioner.analyze_figures_batch(images, contexts)
+        with timed_operation(f"MedGemma batch analysis [{len(figures)} figures]", verbose=verbose):
+            analyses = self.captioner.analyze_figures_batch(images, contexts)
 
         # Process each analysis result
         results = []
@@ -714,50 +722,61 @@ class DocumentModernizer:
         """Process a single figure through analysis, generation, and evaluation."""
         from medgemma import hash_image
 
+        verbose = self.config.verbose
+
         # Compute original hash
         original_hash = hash_image(figure.image)
 
         # Analyze figure with MedGemma
-        logger.debug(f"Analyzing figure {figure.figure_id}")
-        analysis = self.captioner.analyze_figure(
-            figure.image,
-            context=figure.nearby_text,
-        )
+        with timed_operation(f"MedGemma analysis [{figure.figure_id}]", verbose=verbose):
+            analysis = self.captioner.analyze_figure(
+                figure.image,
+                context=figure.nearby_text,
+            )
 
         # Convert to image generation prompt
         brief = self.prompt_adapter.convert(analysis)
+        original_brief = brief  # Keep original for fallback
+
+        # Sanitize prompt to avoid safety filter blocks (if enabled)
+        is_sanitized = False
+        if self.config.sanitize_prompts:
+            sanitizer = get_sanitizer()
+            brief = sanitizer.sanitize_brief(brief)
+            is_sanitized = True
+            logger.debug(f"Sanitized prompt for {figure.figure_id}")
+        else:
+            logger.info(f"Using original (unsanitized) prompt for {figure.figure_id}")
+            logger.debug(f"Original prompt: {brief.prompt[:200]}...")
 
         # Generate new image (img2img conversion from original)
-        logger.debug(f"Generating image for {figure.figure_id}")
-        if isinstance(self.image_generator, CachedImageGenerator):
-            generated_images = self.image_generator.generate(
-                brief,
-                figure.figure_id,
-                self.config.generation_variants,
+        # With fallback: if safety filter blocks and not sanitized, retry with sanitization
+        with timed_operation(f"Image generation [{figure.figure_id}]", verbose=verbose):
+            generated_images, was_sanitized, sanitization_note = self._generate_with_fallback(
+                brief=brief,
+                original_brief=original_brief,
+                figure=figure,
+                is_sanitized=is_sanitized,
             )
-        else:
-            # Pass original image for img2img conversion
-            generated_images = self.image_generator.generate(
-                brief,
-                original_image=figure.image,  # Source image to modernize
-                num_variants=self.config.generation_variants,
-                strength=self.config.generation_strength,
-            )
+
+        # Log if sanitization was applied during fallback
+        if was_sanitized and not is_sanitized:
+            logger.info(f"[{figure.figure_id}] {sanitization_note}")
 
         # Use first generated image
         generated = generated_images[0] if generated_images else None
         generated_image = generated.image if generated else None
         generated_hash = hash_image(generated_image) if generated_image else None
 
-        # Evaluate alignment
+        # Evaluate alignment (only if enabled)
         alignment_result = None
-        if generated_image:
-            logger.debug(f"Evaluating alignment for {figure.figure_id}")
-            alignment_result = self.alignment_scorer.score(
-                figure.image,
-                generated_image,
-                figure.nearby_text,
-            )
+        if self.config.run_alignment_eval and generated_image:
+            with timed_operation(f"Alignment evaluation [{figure.figure_id}]", verbose=verbose):
+                alignment_result = self.alignment_scorer.score(
+                    figure.image,
+                    generated_image,
+                    figure.nearby_text,
+                )
 
         # Create figure metadata
         fig_metadata = FigureMetadata(
@@ -771,6 +790,8 @@ class DocumentModernizer:
             teaching_point=analysis.teaching_point,
             generation_prompt=brief.prompt,
             generation_seed=generated.seed if generated else None,
+            prompt_sanitized=was_sanitized,
+            sanitization_note=sanitization_note,
             alignment_score=alignment_result.alignment_score if alignment_result else None,
             alignment_status=alignment_result.status.value if alignment_result else None,
             alignment_reasoning=alignment_result.reasoning if alignment_result else "",
@@ -785,6 +806,112 @@ class DocumentModernizer:
             generated_image,
             fig_metadata,
         )
+
+    def _generate_with_fallback(
+        self,
+        brief,
+        original_brief,
+        figure: DetectedFigure,
+        is_sanitized: bool,
+        max_retries: int = 3,
+    ) -> tuple[list, bool, str]:
+        """
+        Generate image with retry logic and fallback to sanitized prompt.
+
+        Strategy:
+        1. Try original prompt up to max_retries times
+        2. If all retries fail due to safety filter, apply sanitization
+        3. Track whether sanitization was applied
+
+        Args:
+            brief: Current image brief (may be sanitized or not)
+            original_brief: Original unsanitized brief for reference
+            figure: The figure being processed
+            is_sanitized: Whether the current brief is already sanitized
+            max_retries: Number of retries before falling back to sanitization
+
+        Returns:
+            Tuple of (generated_images, was_sanitized, sanitization_note)
+        """
+        last_error = None
+
+        # Try with current prompt (original or pre-sanitized) up to max_retries
+        for attempt in range(1, max_retries + 1):
+            try:
+                if isinstance(self.image_generator, CachedImageGenerator):
+                    result = self.image_generator.generate(
+                        brief,
+                        figure.figure_id,
+                        self.config.generation_variants,
+                    )
+                else:
+                    result = self.image_generator.generate(
+                        brief,
+                        original_image=figure.image,
+                        num_variants=self.config.generation_variants,
+                        strength=self.config.generation_strength,
+                    )
+                # Success
+                return (result, is_sanitized, "" if not is_sanitized else "Pre-sanitized by config")
+
+            except SafetyFilterError as e:
+                last_error = e
+                if attempt < max_retries:
+                    logger.warning(
+                        f"Safety filter blocked [{figure.figure_id}] "
+                        f"(attempt {attempt}/{max_retries}), retrying..."
+                    )
+                else:
+                    logger.warning(
+                        f"Safety filter blocked [{figure.figure_id}] "
+                        f"after {max_retries} attempts"
+                    )
+
+        # All retries failed - try with sanitized prompt if not already sanitized
+        if not is_sanitized:
+            logger.info(
+                f"Applying sanitization for [{figure.figure_id}] after {max_retries} failed attempts"
+            )
+            logger.debug(f"Original prompt: {original_brief.prompt[:200]}...")
+
+            sanitizer = get_sanitizer()
+            sanitized_brief = sanitizer.sanitize_brief(original_brief)
+
+            logger.info(f"Sanitized prompt: {sanitized_brief.prompt[:200]}...")
+
+            try:
+                if isinstance(self.image_generator, CachedImageGenerator):
+                    result = self.image_generator.generate(
+                        sanitized_brief,
+                        figure.figure_id,
+                        self.config.generation_variants,
+                    )
+                else:
+                    result = self.image_generator.generate(
+                        sanitized_brief,
+                        original_image=figure.image,
+                        num_variants=self.config.generation_variants,
+                        strength=self.config.generation_strength,
+                    )
+
+                # Build sanitization note
+                sanitization_note = (
+                    f"Prompt was sanitized after {max_retries} safety filter blocks. "
+                    f"Original terms replaced for content policy compliance."
+                )
+                return (result, True, sanitization_note)
+
+            except SafetyFilterError:
+                logger.error(
+                    f"Safety filter blocked [{figure.figure_id}] even with sanitized prompt"
+                )
+                raise
+        else:
+            # Already sanitized but still blocked
+            logger.error(
+                f"Safety filter blocked [{figure.figure_id}] even with sanitized prompt"
+            )
+            raise last_error
 
     def _compute_file_hash(self, path: Path) -> str:
         """Compute SHA256 hash of a file."""

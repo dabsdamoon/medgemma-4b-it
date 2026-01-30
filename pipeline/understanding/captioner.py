@@ -352,6 +352,7 @@ class FigureCaptioner:
                 anatomical=constraints_data.get("anatomical", []),
                 style=constraints_data.get("style", []),
                 labels=constraints_data.get("labels", []),
+                colorization=constraints_data.get("colorization", []),
             )
 
             return FigureAnalysis(

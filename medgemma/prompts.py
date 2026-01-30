@@ -19,13 +19,13 @@ DEFAULT_PROMPTS = {
     ),
     "figure_caption": (
         "You are an expert medical professional specializing in medical imaging and documentation. "
-        "Generate a concise, accurate caption for this medical figure. "
+        "Generate an accurate caption for this medical figure. "
         "The caption should:\n"
         "- Identify the type of image (X-ray, CT, MRI, diagram, illustration, etc.)\n"
         "- Describe the anatomical region or medical concept shown\n"
         "- Note any key findings, abnormalities, or teaching points visible\n"
         "- Use precise medical terminology\n"
-        "Keep the caption to 1-3 sentences."
+        "- Clearly identify and distinguish human tissue/skin from medical instruments/tools\n"
     ),
     "figure_analysis": (
         "You are an expert medical professional. Analyze this medical figure and provide "
@@ -40,10 +40,11 @@ DEFAULT_PROMPTS = {
         '  "constraints": {\n'
         '    "anatomical": ["anatomical accuracy requirements for reproduction"],\n'
         '    "style": ["visual style requirements (schematic, realistic, etc.)"],\n'
-        '    "labels": ["required labels or annotations"]\n'
+        '    "labels": ["required labels or annotations"],\n'
+        '    "colorization": ["color requirements for each element type"]\n'
         "  }\n"
         "}\n"
-        "Respond ONLY with valid JSON, no additional text."
+        "- If the image is black-and-white, specify appropriate colors for the modernized version\n"
     ),
     "alignment_eval": (
         "You are an expert medical professional evaluating figure reproduction accuracy. "

@@ -58,10 +58,19 @@ class PromptAdapter:
         "accurate spatial relationships",
     ]
 
+    # Colorization constraints for B&W images
+    COLORIZATION_CONSTRAINTS = [
+        "human skin with natural skin tones (beige, tan, pink)",
+        "medical instruments in metallic silver or steel gray",
+        "clear distinction between skin and tools",
+        "realistic tissue colors for anatomical structures",
+    ]
+
     def __init__(
         self,
         include_safety: bool = True,
         include_anatomical: bool = True,
+        include_colorization: bool = True,
         custom_style_suffix: str = "",
     ):
         """
@@ -70,10 +79,12 @@ class PromptAdapter:
         Args:
             include_safety: Include safety constraints in prompts
             include_anatomical: Include anatomical plausibility constraints
+            include_colorization: Include colorization guidance for B&W images
             custom_style_suffix: Additional style text to append
         """
         self.include_safety = include_safety
         self.include_anatomical = include_anatomical
+        self.include_colorization = include_colorization
         self.custom_style_suffix = custom_style_suffix
 
     def convert(
@@ -116,10 +127,17 @@ class PromptAdapter:
         if analysis.teaching_point:
             prompt_parts.append(f"illustrating: {analysis.teaching_point}")
 
-        # Add caption if provided
+        # Add visual description if provided
         if caption or analysis.caption:
-            cap = caption or analysis.caption
-            prompt_parts.append(f"({cap})")
+            visual_description = caption or analysis.caption
+            prompt_parts.append(f"visual description: {visual_description}")
+
+        # Add colorization guidance
+        if self.include_colorization:
+            prompt_parts.append(
+                "with natural skin tones for human tissue, "
+                "metallic silver for medical instruments"
+            )
 
         # Add custom style suffix
         if self.custom_style_suffix:
@@ -147,6 +165,14 @@ class PromptAdapter:
                 "inappropriate",
             ])
 
+        if self.include_colorization:
+            negative_parts.extend([
+                "dark skin colored like metal",
+                "black skin on human body",
+                "skin same color as tools",
+                "unnatural skin color",
+            ])
+
         negative_prompt = ", ".join(negative_parts)
 
         # Collect all constraints
@@ -155,11 +181,16 @@ class PromptAdapter:
             constraints.extend(self.SAFETY_CONSTRAINTS)
         if self.include_anatomical:
             constraints.extend(self.ANATOMICAL_CONSTRAINTS)
+        if self.include_colorization:
+            constraints.extend(self.COLORIZATION_CONSTRAINTS)
 
         # Add analysis-specific constraints
         if analysis.constraints:
             constraints.extend(analysis.constraints.anatomical)
             constraints.extend(analysis.constraints.style)
+            # Add colorization constraints from analysis if present
+            if hasattr(analysis.constraints, 'colorization') and analysis.constraints.colorization:
+                constraints.extend(analysis.constraints.colorization)
 
         # Determine aspect ratio based on figure type
         aspect_ratio = self._determine_aspect_ratio(analysis)

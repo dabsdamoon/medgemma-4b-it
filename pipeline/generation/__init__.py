@@ -6,7 +6,13 @@ from .vertex_image_generator import (
     VertexImageGenerator,
     GeneratedImage,
     ImageModel,
+    SafetyFilterError,
     create_generator,
+)
+from .prompt_sanitizer import (
+    PromptSanitizer,
+    get_sanitizer,
+    sanitize_prompt,
 )
 
 __all__ = [
@@ -17,5 +23,9 @@ __all__ = [
     "VertexImageGenerator",
     "GeneratedImage",
     "ImageModel",
+    "SafetyFilterError",
     "create_generator",
+    "PromptSanitizer",
+    "get_sanitizer",
+    "sanitize_prompt",
 ]

@@ -8,6 +8,17 @@ Usage:
     python run_pipeline.py --cached breech_types
 """
 
+# Suppress NumPy/Torch compatibility warnings before any imports
+import os
+os.environ["PYTHONWARNINGS"] = "ignore"
+
+import warnings
+warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", message=".*NumPy.*")
+warnings.filterwarnings("ignore", message=".*_ARRAY_API.*")
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
 import argparse
 import logging
 import sys
@@ -21,12 +32,26 @@ load_dotenv()
 
 def setup_logging(verbose: bool = False) -> None:
     """Configure logging."""
+    # Set base level for our code
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
+
+    # Suppress noisy third-party library logs
+    noisy_loggers = [
+        "PIL",
+        "urllib3",
+        "httpcore",
+        "httpx",
+        "google",
+        "google_genai",
+        "google.auth",
+    ]
+    for logger_name in noisy_loggers:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 
 def main():
@@ -104,6 +129,16 @@ Examples:
         "--no-filter",
         action="store_true",
         help="Disable local figure filtering (process all detected figures)",
+    )
+    parser.add_argument(
+        "--eval",
+        action="store_true",
+        help="Run alignment evaluation after image generation (disabled by default)",
+    )
+    parser.add_argument(
+        "--no-sanitize",
+        action="store_true",
+        help="Disable prompt sanitization (may trigger safety filters)",
     )
 
     # OCR options
@@ -192,6 +227,8 @@ Examples:
         config.filter_figures = not args.no_filter
         config.generation_variants = args.variants
         config.ocr_language = args.ocr_language
+        config.run_alignment_eval = args.eval
+        config.sanitize_prompts = not args.no_sanitize
 
         config.alignment_thresholds = AlignmentThresholds(
             pass_threshold=args.pass_threshold,
@@ -254,7 +291,8 @@ Examples:
                 print(f"  - {error}")
 
         print("\nOutput files:")
-        print(f"  - {bundle.ocr_text_path}")
+        if bundle.ocr_text_path:
+            print(f"  - {bundle.ocr_text_path}")
         print(f"  - {bundle.metadata_path}")
         if args.analyze_only:
             analysis_path = bundle.output_dir / "analysis_results.json"

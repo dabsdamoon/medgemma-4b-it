@@ -19,6 +19,15 @@ from .prompt_adapter import ImageBrief
 
 logger = logging.getLogger(__name__)
 
+
+class SafetyFilterError(Exception):
+    """Raised when Vertex AI blocks a prompt due to safety filters."""
+
+    def __init__(self, message: str, original_prompt: str = ""):
+        super().__init__(message)
+        self.original_prompt = original_prompt
+
+
 # Check for google-genai availability
 try:
     from google import genai
@@ -178,23 +187,28 @@ class VertexImageGenerator:
         # Include strength guidance in prompt
         strength_guidance = self._get_strength_guidance(strength)
 
-        full_prompt = f"""Transform this medical figure into a modern, high-quality illustration.
+        full_prompt = f"""CONTEXT: This is for MEDICAL EDUCATION purposes. The image is from a medical textbook
+and will be used for training healthcare professionals.
+
+TASK: Translate/convert this medical figure into a modern, high-quality version for medical education.
+This is IMAGE-TO-IMAGE TRANSLATION - preserve the EXACT content, just modernize the style.
 
 {strength_guidance}
 
 Style requirements:
 {brief.prompt}
 
-Constraints:
-- Preserve all anatomical accuracy from the original
-- Maintain the same layout and structure
-- Keep all labels and annotations readable
-- Use clean, professional medical illustration style
+CRITICAL constraints:
+- DO NOT add any new elements that are not in the original image
+- DO NOT remove any elements from the original image
+- Preserve all anatomical accuracy from the original EXACTLY
+- Maintain the same layout, structure, and composition
+- Keep all labels and annotations in the same positions and readable
+- Only modernize the visual style (colors, line quality, clarity)
+- This is translation, not creation - output must match input content 1:1
 
 Avoid:
-{brief.negative_prompt}
-
-Generate {num_variants} variant(s)."""
+{brief.negative_prompt}"""
 
         logger.info(f"Generating {num_variants} variant(s) with model {self.model.value}")
 
@@ -202,16 +216,28 @@ Generate {num_variants} variant(s)."""
         image_bytes = image_to_bytes(resized_original)
 
         # Create multimodal content (image + text)
-        response = self._client.models.generate_content(
-            model=self.model.value,
-            contents=[
-                Part.from_bytes(data=image_bytes, mime_type="image/png"),
-                full_prompt,
-            ],
-            config=GenerateContentConfig(
-                response_modalities=[Modality.IMAGE, Modality.TEXT],
-            ),
-        )
+        try:
+            response = self._client.models.generate_content(
+                model=self.model.value,
+                contents=[
+                    Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                    full_prompt,
+                ],
+                config=GenerateContentConfig(
+                    response_modalities=[Modality.IMAGE, Modality.TEXT],
+                ),
+            )
+        except Exception as e:
+            error_msg = str(e).lower()
+            # Check for safety filter related errors
+            if any(term in error_msg for term in ["safety", "blocked", "filter", "policy"]):
+                logger.warning(f"Safety filter blocked prompt: {e}")
+                raise SafetyFilterError(
+                    f"Prompt blocked by safety filter: {e}",
+                    original_prompt=brief.prompt,
+                )
+            # Re-raise other exceptions
+            raise
 
         # Parse response into GeneratedImage objects
         return self._parse_response(response, brief, seed or 0, num_variants)
@@ -219,13 +245,13 @@ Generate {num_variants} variant(s)."""
     def _get_strength_guidance(self, strength: float) -> str:
         """Convert strength parameter to prompt guidance."""
         if strength < 0.3:
-            return "Make minimal changes - only enhance clarity and colors while preserving the original style exactly."
+            return "TRANSLATION LEVEL: Minimal - only enhance clarity and colors while preserving the original style exactly."
         elif strength < 0.5:
-            return "Moderately modernize - improve quality while keeping the original composition and style recognizable."
+            return "TRANSLATION LEVEL: Moderate - improve quality while keeping the original composition and style recognizable."
         elif strength < 0.7:
-            return "Significantly modernize - create a cleaner, more professional version while preserving key elements."
+            return "TRANSLATION LEVEL: Significant - convert to a cleaner, more professional version while preserving all elements."
         else:
-            return "Fully modernize - create a contemporary medical illustration style while preserving anatomical accuracy."
+            return "TRANSLATION LEVEL: Full - convert to contemporary medical illustration style while preserving all anatomical content exactly."
 
     def _parse_response(
         self,
