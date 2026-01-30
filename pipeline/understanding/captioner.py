@@ -348,11 +348,22 @@ class FigureCaptioner:
 
             # Parse constraints
             constraints_data = data.get("constraints", {})
+
+            # Handle colorization - MedGemma may return dict or list
+            colorization_raw = constraints_data.get("colorization", [])
+            if isinstance(colorization_raw, dict):
+                # Convert dict to list: {'fetus': 'Pink'} -> ['fetus: Pink']
+                colorization = [f"{k}: {v}" for k, v in colorization_raw.items()]
+            elif isinstance(colorization_raw, list):
+                colorization = colorization_raw
+            else:
+                colorization = []
+
             constraints = AnalysisConstraints(
                 anatomical=constraints_data.get("anatomical", []),
                 style=constraints_data.get("style", []),
                 labels=constraints_data.get("labels", []),
-                colorization=constraints_data.get("colorization", []),
+                colorization=colorization,
             )
 
             return FigureAnalysis(

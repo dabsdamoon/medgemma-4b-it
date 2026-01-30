@@ -162,7 +162,12 @@ Examples:
         choices=[1, 2, 3, 4],
         help="Number of image variants to generate (default: 1)",
     )
-
+    parser.add_argument(
+        "--generator",
+        choices=["vertex_flash", "vertex_pro", "cached"],
+        default="vertex_flash",
+        help="Image generator backend: vertex_flash (Nano Banana, default), vertex_pro (Nano Banana Pro), cached",
+    )
 
     # Evaluation thresholds
     parser.add_argument(
@@ -203,6 +208,7 @@ Examples:
             PipelineMode,
             OCRBackend,
             AlignmentThresholds,
+            ImageGeneratorBackend,
         )
         from pipeline.orchestrator import DocumentModernizer
     except ImportError as e:
@@ -238,6 +244,9 @@ Examples:
         # Override OCR backend if specified
         if args.ocr:
             config.ocr_backend = OCRBackend(args.ocr)
+
+        # Set image generator backend
+        config.image_generator = ImageGeneratorBackend(args.generator)
 
     except Exception as e:
         logger.error(f"Configuration error: {e}")

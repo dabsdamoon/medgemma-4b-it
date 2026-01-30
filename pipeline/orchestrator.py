@@ -138,10 +138,11 @@ class DocumentModernizer:
                 )
             elif backend == ImageGeneratorBackend.VERTEX_PRO:
                 # Nano Banana Pro (Gemini 3 Pro) - higher quality
+                # Note: PRO model requires 'global' location, let auto-selection handle it
                 self._image_generator = VertexImageGenerator(
                     model=ImageModel.PRO,
                     project_id=self.config.gcp_project_id,
-                    location=self.config.gcp_location,
+                    # location omitted: PRO requires 'global', auto-selected by VertexImageGenerator
                 )
             elif backend == ImageGeneratorBackend.NANO_BANANA:
                 # Direct Nano Banana API (legacy)
